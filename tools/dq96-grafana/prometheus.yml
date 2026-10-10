@@ -1,0 +1,39 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Miner JSON API -> metrics. Change the target if the miner's IP changes.
+  - job_name: miner
+    metrics_path: /probe
+    params:
+      module: [axeos]
+    static_configs:
+      - targets: ["http://192.168.0.41/api/system/info"]
+        labels:
+          miner: DQ96
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: json-exporter:7979
+
+  # Is the Public Pool stratum port (2018) and web UI (2019) answering?
+  - job_name: pool
+    metrics_path: /probe
+    static_configs:
+      - targets: ["192.168.0.27:2018"]
+        labels: {module: tcp_connect, check: stratum}
+      - targets: ["http://192.168.0.27:2019"]
+        labels: {module: http_2xx, check: pool_ui}
+    relabel_configs:
+      - source_labels: [module]
+        target_label: __param_module
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
