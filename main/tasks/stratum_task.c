@@ -1,6 +1,7 @@
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "esp_transport.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "global_state.h"
@@ -19,6 +20,11 @@
 #define HEARTBEAT_INTERVAL_MS 60000
 #define INITIAL_HEARTBEAT_DELAY_MS 10000
 #define RECOVERY_PROBE_INTERVAL_MS 30000
+#define HEALTH_POLL_INTERVAL_MS 15000
+#define HEALTH_WORK_STALL_US (10LL * 60 * 1000000)     // no new mining job from a connected pool
+#define HEALTH_SHARE_STALL_US (3LL * 60 * 1000000)     // submitted shares left unanswered
+#define HEALTH_REJECT_STREAK 10                        // consecutive rejects without an accept
+#define HEALTH_PRIMARY_HOLDDOWN_US (15LL * 60 * 1000000) // keep fallback after a health failover
 
 static GlobalState *s_global_state = NULL;
 static volatile bool s_should_reconnect = false;
@@ -57,25 +63,121 @@ bool stratum_probe_pool(GlobalState *gs, uint16_t pool_idx)
     return stratum_v1_probe_pool(gs, pool_idx);
 }
 
+typedef struct {
+    esp_transport_handle_t transport;
+    uint64_t work_received;
+    uint64_t results;
+    uint64_t accepted;
+    uint16_t pending;
+    int64_t last_work_us;
+    int64_t unanswered_since_us;
+    uint32_t reject_streak;
+} pool_health_t;
+
+static pool_health_t s_health;
+static int64_t s_primary_holddown_until_us = 0;
+
+static void pool_health_reset(GlobalState *gs, int64_t now)
+{
+    s_health = (pool_health_t){
+        .transport = gs->transport,
+        .work_received = gs->SYSTEM_MODULE.work_received,
+        .results = gs->SYSTEM_MODULE.shares_accepted + gs->SYSTEM_MODULE.shares_rejected,
+        .accepted = gs->SYSTEM_MODULE.shares_accepted,
+        .pending = gs->SYSTEM_MODULE.shares_pending,
+        .last_work_us = now,
+    };
+}
+
+// Detects a pool that is still connected but no longer useful (stalled jobs, unanswered or
+// continuously rejected shares) and fails over to the fallback pool or forces a reconnect.
+static void pool_health_poll(GlobalState *gs)
+{
+    int64_t now = esp_timer_get_time();
+    SystemModule *sm = &gs->SYSTEM_MODULE;
+
+    if (gs->transport == NULL || sm->mining_paused || sm->hardware_fault || stratum_reconnect_requested()) {
+        s_health.transport = NULL;
+        return;
+    }
+
+    uint64_t results = sm->shares_accepted + sm->shares_rejected;
+    if (gs->transport != s_health.transport || sm->work_received < s_health.work_received || results < s_health.results) {
+        pool_health_reset(gs, now);
+        return;
+    }
+
+    if (sm->work_received != s_health.work_received) {
+        s_health.work_received = sm->work_received;
+        s_health.last_work_us = now;
+    }
+
+    if (results != s_health.results) {
+        s_health.reject_streak = (sm->shares_accepted != s_health.accepted) ? 0 : s_health.reject_streak + (uint32_t)(results - s_health.results);
+        s_health.results = results;
+        s_health.accepted = sm->shares_accepted;
+        s_health.unanswered_since_us = 0;
+    } else if (sm->shares_pending > s_health.pending && s_health.unanswered_since_us == 0) {
+        s_health.unanswered_since_us = now;
+    }
+    s_health.pending = sm->shares_pending;
+
+    const char *reason = NULL;
+    if (now - s_health.last_work_us > HEALTH_WORK_STALL_US) {
+        reason = "no new work";
+    } else if (s_health.unanswered_since_us != 0 && now - s_health.unanswered_since_us > HEALTH_SHARE_STALL_US) {
+        reason = "shares unanswered";
+    } else if (s_health.reject_streak >= HEALTH_REJECT_STREAK) {
+        reason = "all shares rejected";
+    }
+    if (!reason) return;
+
+    uint16_t prim_idx = sm->primary_pool_index;
+    uint16_t sec_idx = sm->secondary_pool_index;
+    bool has_fallback = sm->pools[sec_idx].url != NULL && sm->pools[sec_idx].url[0] != '\0';
+
+    if (!sm->is_using_fallback && !sm->use_fallback_stratum && has_fallback) {
+        ESP_LOGW(TAG, "Health: primary pool %u unhealthy (%s), failing over to pool %u", prim_idx, reason, sec_idx);
+        sm->is_using_fallback = true;
+        s_primary_holddown_until_us = now + HEALTH_PRIMARY_HOLDDOWN_US;
+    } else {
+        ESP_LOGW(TAG, "Health: active pool unhealthy (%s), reconnecting", reason);
+    }
+    s_health.transport = NULL;
+    stratum_request_reconnect();
+}
+
 static void stratum_heartbeat_task(void *pvParameters)
 {
     GlobalState *gs = (GlobalState *)pvParameters;
+    int64_t next_probe_us = esp_timer_get_time() + (int64_t)HEARTBEAT_INTERVAL_MS * 1000;
 
     while (1) {
-        // Wait for periodic heartbeat or immediate wake-up via stratum_trigger_heartbeat_check()
-        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(HEARTBEAT_INTERVAL_MS));
+        // Poll pool health periodically; wake immediately via stratum_trigger_heartbeat_check()
+        bool triggered = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(HEALTH_POLL_INTERVAL_MS)) > 0;
 
         if (!gs) continue;
+
+        pool_health_poll(gs);
+
+        int64_t now = esp_timer_get_time();
+        if (!triggered && now < next_probe_us) continue;
+        next_probe_us = now + (int64_t)HEARTBEAT_INTERVAL_MS * 1000;
 
         if (gs->SYSTEM_MODULE.is_using_fallback &&
             !gs->SYSTEM_MODULE.use_fallback_stratum &&
             wifi_is_connected()) {
 
             uint16_t prim_idx = gs->SYSTEM_MODULE.primary_pool_index;
+            if (!triggered && now < s_primary_holddown_until_us) {
+                ESP_LOGI(TAG, "Heartbeat: primary pool %u in health hold-down, staying on fallback", prim_idx);
+                continue;
+            }
             const char *url = gs->SYSTEM_MODULE.pools[prim_idx].url;
             ESP_LOGI(TAG, "Heartbeat: probing primary pool %u (%s)...", prim_idx, url ? url : "unknown");
             if (stratum_probe_pool(gs, prim_idx)) {
                 ESP_LOGI(TAG, "Primary pool %u is back online! Switching from fallback.", prim_idx);
+                s_primary_holddown_until_us = 0;
                 gs->SYSTEM_MODULE.is_using_fallback = false;
                 stratum_request_reconnect();
             } else {
@@ -132,7 +234,7 @@ void stratum_task(void *pvParameters)
 
     ESP_LOGI(TAG, "Starting");
 
-    // Periodic heartbeat task to probe primary pool while running fallback
+    // Periodic heartbeat task: polls active pool health and probes primary pool while running fallback
     if (xTaskCreateWithCaps(stratum_heartbeat_task, "stratum_hb", 8192, (void *)GLOBAL_STATE, 2, &s_heartbeat_task_handle, MALLOC_CAP_SPIRAM) != pdPASS) {
         ESP_LOGE(TAG, "Failed to create stratum heartbeat task");
     }
