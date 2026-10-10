@@ -435,6 +435,18 @@
             <div class="flex flex-nowrap">
               <div class="w-24 shrink-0 text-secondary">
                 <tooltip-text-icon
+                  text="Health"
+                  tooltip="Pool health monitor: fails over or reconnects when the pool stops sending work, answering shares, or accepting shares"
+                />
+              </div>
+              <div [style.color]="poolHealthColor" appTooltip="{{ poolHealthTooltip }}" tooltipPosition="top">
+                {{ poolHealthText }}
+              </div>
+            </div>
+
+            <div class="flex flex-nowrap">
+              <div class="w-24 shrink-0 text-secondary">
+                <tooltip-text-icon
                   text="Time"
                   tooltip="Time it takes for the pool to respond to a share"
                 />

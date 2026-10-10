@@ -76,6 +76,9 @@ typedef struct {
 
 static pool_health_t s_health;
 static int64_t s_primary_holddown_until_us = 0;
+static uint32_t s_health_actions = 0;
+static const char *s_health_last_reason = NULL;
+static int64_t s_health_last_action_us = 0;
 
 static void pool_health_reset(GlobalState *gs, int64_t now)
 {
@@ -132,6 +135,10 @@ static void pool_health_poll(GlobalState *gs)
     }
     if (!reason) return;
 
+    s_health_actions++;
+    s_health_last_reason = reason;
+    s_health_last_action_us = now;
+
     uint16_t prim_idx = sm->primary_pool_index;
     uint16_t sec_idx = sm->secondary_pool_index;
     bool has_fallback = sm->pools[sec_idx].url != NULL && sm->pools[sec_idx].url[0] != '\0';
@@ -145,6 +152,22 @@ static void pool_health_poll(GlobalState *gs)
     }
     s_health.transport = NULL;
     stratum_request_reconnect();
+}
+
+void stratum_get_pool_health(pool_health_info_t *out)
+{
+    int64_t now = esp_timer_get_time();
+    bool tracking = s_health.transport != NULL;
+
+    *out = (pool_health_info_t){
+        .last_work_age_s = tracking ? (int32_t)((now - s_health.last_work_us) / 1000000) : -1,
+        .unanswered_age_s = (tracking && s_health.unanswered_since_us != 0) ? (int32_t)((now - s_health.unanswered_since_us) / 1000000) : 0,
+        .reject_streak = tracking ? s_health.reject_streak : 0,
+        .actions = s_health_actions,
+        .last_reason = s_health_last_reason ? s_health_last_reason : "",
+        .last_action_age_s = s_health_actions ? (int32_t)((now - s_health_last_action_us) / 1000000) : -1,
+        .primary_holddown_s = now < s_primary_holddown_until_us ? (int32_t)((s_primary_holddown_until_us - now) / 1000000) : 0,
+    };
 }
 
 static void stratum_heartbeat_task(void *pvParameters)
