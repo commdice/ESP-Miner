@@ -194,6 +194,9 @@ export class HomeComponent implements OnInit, OnDestroy {
   public sortedRejectionReasons: Array<{ message: string; count: number; percentage: number }> = [];
   public networkDifficultyPercentage: string = '0';
   public payoutPercentage: number = -1;
+  public poolHealthText: string = '--';
+  public poolHealthColor: string = 'inherit';
+  public poolHealthTooltip: string = '';
   public chartDataSources: { name: string; value: string }[] = [];
   private lastHasVrTemp = false;
   private lastHasAsicTemp2 = false;
@@ -958,6 +961,7 @@ export class HomeComponent implements OnInit, OnDestroy {
         this.expectedEfficiency = this.calculateEfficiency(info, 'expectedHashrate');
         this.networkDifficultyPercentage = this.getNetworkDifficultyPercentage(info);
         this.payoutPercentage = this.getPayoutPercentage(info);
+        this.updatePoolHealth(info);
 
         const preferredPool: PoolLabel = info.useFallbackStratum === 1 ? 'Fallback' : 'Primary';
         const activePool: PoolLabel = info.isUsingFallbackStratum === 1 ? 'Fallback' : 'Primary';
@@ -1263,13 +1267,45 @@ export class HomeComponent implements OnInit, OnDestroy {
     updateMessage(!!info.power_fault, 'POWER_FAULT', 'error', `${info.power_fault} Check your Power Supply.`);
     updateMessage(!!info.hardware_fault, 'HARDWARE_FAULT', 'error', `${info.hardware_fault}`);
     updateMessage(isFrequencyLow(info.frequency, frequencyOptions), 'FREQUENCY_LOW', 'warn', 'Device frequency is set low - See settings');
-    updateMessage(info.isUsingFallbackStratum === 1 && info.useFallbackStratum === 0, 'FALLBACK_STRATUM', 'warn', 'Primary pool unreachable - operating on fallback pool.');
+    const healthFailover = (info.poolHealth?.primaryHolddown ?? 0) > 0;
+    updateMessage(info.isUsingFallbackStratum === 1 && info.useFallbackStratum === 0, 'FALLBACK_STRATUM', 'warn', healthFailover
+      ? `Primary pool unhealthy (${info.poolHealth.lastReason}) - operating on fallback pool, retrying primary in ${this.formatAge(info.poolHealth.primaryHolddown)}.`
+      : 'Primary pool unreachable - operating on fallback pool.');
     if (info.coinbaseOutputs && info.coinbaseOutputs.length > 0) {
       let percentage = this.getPayoutPercentage(info);
       const warn = this.activePoolShareWarning;
       updateMessage(warn && percentage > 0 && percentage < 95, 'NOT_SOLO_MINING', 'warn', `Your share of the mining reward is only ${percentage.toFixed(1)}%`);
       updateMessage(warn && percentage === 0, 'NO_MINING_REWARD', 'warn', `You don't have a share in the mining reward`);
     }
+  }
+
+  private formatAge(seconds: number): string {
+    return DateAgoPipe.transform(seconds, { strict: true, short: true, intervals: 2 }) || '0s';
+  }
+
+  private updatePoolHealth(info: ISystemInfo): void {
+    const health = info.poolHealth;
+    if (!health || health.lastWorkAge < 0) {
+      this.poolHealthText = '--';
+      this.poolHealthColor = 'inherit';
+      this.poolHealthTooltip = 'Not connected to a pool';
+      return;
+    }
+
+    // Warn at half of the firmware thresholds (10 min no work, 3 min unanswered, 10 rejects)
+    const issues: string[] = [];
+    if (health.lastWorkAge >= 300) issues.push(`No new work for ${this.formatAge(health.lastWorkAge)}`);
+    if (health.unansweredAge >= 90) issues.push(`Shares unanswered for ${this.formatAge(health.unansweredAge)}`);
+    if (health.rejectStreak >= 5) issues.push(`${health.rejectStreak} rejects in a row`);
+
+    this.poolHealthText = issues[0] ?? 'OK';
+    this.poolHealthColor = issues.length ? 'orange' : 'green';
+
+    const details = [`Last job ${this.formatAge(health.lastWorkAge)} ago`, `Health failovers since boot: ${health.actions}`];
+    if (health.actions > 0 && health.lastActionAge >= 0) {
+      details.push(`Last: ${health.lastReason}, ${this.formatAge(health.lastActionAge)} ago`);
+    }
+    this.poolHealthTooltip = details.join(' · ');
   }
 
   private calculateEfficiency(info: ISystemInfo, key: 'hashRate' | 'hashRate_1m' | 'expectedHashrate'): number {

@@ -18,6 +18,7 @@
 #include "cjson_utils.h"
 #include "statistics_task.h"
 #include "asic.h"
+#include "stratum_task.h"
 
 
 static const char *get_reset_reason_str(esp_reset_reason_t reason)
@@ -157,6 +158,18 @@ static void system_api_add_config(cJSON *root, GlobalState *g) {
     // Pool Configuration
     cJSON_AddStringToObject(root, "poolConnectionInfo", g->SYSTEM_MODULE.pool_connection_info);
     cJSON_AddNumberToObject(root, "isUsingFallbackStratum", g->SYSTEM_MODULE.is_using_fallback ? 1 : 0);
+
+    pool_health_info_t health;
+    stratum_get_pool_health(&health);
+    cJSON *health_obj = cJSON_CreateObject();
+    cJSON_AddItemToObject(root, "poolHealth", health_obj);
+    cJSON_AddNumberToObject(health_obj, "lastWorkAge", health.last_work_age_s);
+    cJSON_AddNumberToObject(health_obj, "unansweredAge", health.unanswered_age_s);
+    cJSON_AddNumberToObject(health_obj, "rejectStreak", health.reject_streak);
+    cJSON_AddNumberToObject(health_obj, "actions", health.actions);
+    cJSON_AddStringToObject(health_obj, "lastReason", health.last_reason);
+    cJSON_AddNumberToObject(health_obj, "lastActionAge", health.last_action_age_s);
+    cJSON_AddNumberToObject(health_obj, "primaryHolddown", health.primary_holddown_s);
     
     uint16_t prim_idx = g->SYSTEM_MODULE.primary_pool_index;
     uint16_t sec_idx = g->SYSTEM_MODULE.secondary_pool_index;

@@ -154,6 +154,7 @@ const mockSystemInfo: ISystemInfo = {
   fallbackStratumPort: 3333,
   fallbackStratumProtocol: 'SV1',
   isUsingFallbackStratum: 0,
+  poolHealth: { lastWorkAge: 12, unansweredAge: 0, rejectStreak: 0, actions: 0, lastReason: '', lastActionAge: -1, primaryHolddown: 0 },
   useFallbackStratum: 0
 };
 
@@ -328,6 +329,31 @@ describe('HomeComponent', () => {
       expect(component.activePoolURL).toBe(mockSystemInfo.stratumURL);
       expect(component.activePoolUser).toBe(mockSystemInfo.stratumUser);
       expect(updateSpy).not.toHaveBeenCalled();
+    });
+
+    it('should report pool health and health-triggered failover', () => {
+      const healthy = mockSystemInfo.poolHealth;
+      fixture.detectChanges();
+      expect(component.poolHealthText).toBe('OK');
+
+      emitPoolInfo({ poolHealth: { ...healthy, rejectStreak: 6 } });
+      expect(component.poolHealthText).toBe('6 rejects in a row');
+      expect(component.poolHealthColor).toBe('orange');
+
+      emitPoolInfo({ poolHealth: { ...healthy, lastWorkAge: -1 } });
+      expect(component.poolHealthText).toBe('--');
+
+      const failedOver = {
+        ...mockSystemInfo,
+        useFallbackStratum: 0,
+        isUsingFallbackStratum: 1,
+        poolHealth: { ...healthy, actions: 1, lastReason: 'no new work', lastActionAge: 30, primaryHolddown: 600 }
+      };
+      emitPoolInfo(failedOver);
+      component.handleSystemMessages(failedOver, { duration: 0, startTime: null }, [100, 200, 300]);
+      const fallback = component.messages.find(message => message.type === 'FALLBACK_STRATUM');
+      expect(fallback?.text).toBe('Primary pool unhealthy (no new work) - operating on fallback pool, retrying primary in 10m.');
+      expect(component.poolHealthTooltip).toContain('Last: no new work');
     });
 
     it('should show primary when fallback is preferred but primary is active', async () => {

@@ -168,6 +168,15 @@ export class SystemApiService {
         responseTime: 10,
         responseShareBatch: 1,
         isUsingFallbackStratum: 0,
+        poolHealth: {
+          lastWorkAge: 12,
+          unansweredAge: 0,
+          rejectStreak: 0,
+          actions: 0,
+          lastReason: "",
+          lastActionAge: -1,
+          primaryHolddown: 0
+        },
         useFallbackStratum: 0,
         poolConnectionInfo: "IPv4 (TLS)",
         frequency: 485,

@@ -115,6 +115,38 @@ components:
         count:
           type: integer
           description: Shares rejected for this reason
+    PoolHealth:
+      type: object
+      required:
+        - lastWorkAge
+        - unansweredAge
+        - rejectStreak
+        - actions
+        - lastReason
+        - lastActionAge
+        - primaryHolddown
+      properties:
+        lastWorkAge:
+          type: integer
+          description: Seconds since the active pool sent new work (-1 when not connected)
+        unansweredAge:
+          type: integer
+          description: Seconds the oldest unanswered share has been waiting (0 when none)
+        rejectStreak:
+          type: integer
+          description: Consecutive rejected shares without an accepted share
+        actions:
+          type: integer
+          description: Health-triggered failovers or reconnects since boot
+        lastReason:
+          type: string
+          description: Reason for the last health-triggered action (empty when none)
+        lastActionAge:
+          type: integer
+          description: Seconds since the last health-triggered action (-1 when none)
+        primaryHolddown:
+          type: integer
+          description: Seconds before the primary pool may be retried after a health failover (0 when none)
     WifiNetwork:
       type: object
       required:
@@ -286,6 +318,7 @@ components:
         - invertscreen
         - isPSRAMAvailable
         - isUsingFallbackStratum
+        - poolHealth
         - macAddr
         - manualFanSpeed
         - maxPower
@@ -499,6 +532,8 @@ components:
         isUsingFallbackStratum:
           type: number
           description: Whether using fallback stratum (0=no, 1=yes)
+        poolHealth:
+          $ref: '#/components/schemas/PoolHealth'
         macAddr:
           type: string
           description: Device MAC address
